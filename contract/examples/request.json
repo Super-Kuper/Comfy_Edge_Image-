@@ -1,0 +1,133 @@
+{
+  "input": {
+    "prompt": {
+      "1": {
+        "class_type": "UNETLoader",
+        "inputs": {
+          "unet_name": "flux-2-klein-4b.safetensors",
+          "weight_dtype": "default"
+        }
+      },
+      "2": {
+        "class_type": "CLIPLoader",
+        "inputs": {
+          "clip_name": "qwen_3_4b.safetensors",
+          "type": "flux2"
+        }
+      },
+      "3": {
+        "class_type": "VAELoader",
+        "inputs": {
+          "vae_name": "flux2-vae.safetensors"
+        }
+      },
+      "4": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+          "clip": [
+            "2",
+            0
+          ],
+          "text": "cinematic still, woman in a grey coat on a rainy street, red neon reflection, 35mm"
+        }
+      },
+      "5": {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+          "clip": [
+            "2",
+            0
+          ],
+          "text": ""
+        }
+      },
+      "6": {
+        "class_type": "EmptySD3LatentImage",
+        "inputs": {
+          "width": 768,
+          "height": 1344,
+          "batch_size": 1
+        }
+      },
+      "7": {
+        "class_type": "KSampler",
+        "inputs": {
+          "model": [
+            "1",
+            0
+          ],
+          "positive": [
+            "4",
+            0
+          ],
+          "negative": [
+            "5",
+            0
+          ],
+          "latent_image": [
+            "6",
+            0
+          ],
+          "seed": 20261113,
+          "steps": 4,
+          "cfg": 1.0,
+          "sampler_name": "euler",
+          "scheduler": "simple",
+          "denoise": 1.0
+        }
+      },
+      "8": {
+        "class_type": "VAEDecode",
+        "inputs": {
+          "samples": [
+            "7",
+            0
+          ],
+          "vae": [
+            "3",
+            0
+          ]
+        }
+      },
+      "9": {
+        "class_type": "SaveImage",
+        "inputs": {
+          "images": [
+            "8",
+            0
+          ],
+          "filename_prefix": "keyframe"
+        }
+      }
+    },
+    "parameter": {
+      "mode": "generate",
+      "scene_id": 2,
+      "width": 768,
+      "height": 1344,
+      "seed": 20261113,
+      "steps": 4,
+      "cfg": 1.0,
+      "sampler": "euler",
+      "scheduler": "simple",
+      "prompt": "cinematic still, woman in a grey coat on a rainy street, red neon reflection, 35mm",
+      "negative_prompt": "",
+      "model": {
+        "id": "70f1c8c2-4f53-4b9d-9a91-3d5d0f4a1e10",
+        "slug": "flux2-klein-4b",
+        "name": "FLUX.2 klein 4B",
+        "license": "commercial",
+        "graph_revision": 3,
+        "graph_hash": "3a4d6c8e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4"
+      }
+    },
+    "acceleration": {
+      "gpu_class": "RTX A6000",
+      "use_turbo": false
+    }
+  },
+  "policy": {
+    "executionTimeout": 900000,
+    "ttl": 900000
+  }
+}

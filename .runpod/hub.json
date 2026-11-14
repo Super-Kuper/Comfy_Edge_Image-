@@ -1,0 +1,120 @@
+{
+  "title": "Image Serverless — FLUX.2 klein 4B / Qwen-Image-Edit-2511",
+  "description": "ComfyUI serverless worker for image keyframes: text-to-image with FLUX.2 klein 4B (Apache-2.0) and instruction/mask editing with Qwen-Image-Edit-2511 (Apache-2.0). It executes a prepared ComfyUI API graph built by the video_gen catalog (it never builds or edits the graph), accepts base image and mask as presigned assets, and returns the generated PNG plus execution-fact telemetry (GPU, seconds, size, model, seed, steps, cfg, sampler, scheduler). Models download to your network volume on first boot from pinned Hugging Face commits.",
+  "type": "serverless",
+  "category": "image",
+  "config": {
+    "runsOn": "GPU",
+    "containerDiskInGb": 40,
+    "gpuCount": 1,
+    "gpuIds": "AMPERE_48,ADA_48_PRO",
+    "allowedCudaVersions": [
+      "13.0",
+      "13.1",
+      "13.2",
+      "13.3",
+      "13.4"
+    ],
+    "env": [
+      {
+        "key": "VOLUME_AUTOPOPULATE",
+        "input": {
+          "type": "boolean",
+          "name": "Auto-download models",
+          "description": "Download the models listed in models-manifest.txt to the attached network volume at worker boot. Requires a network volume of at least 60 GB (100 GB recommended).",
+          "default": true,
+          "trueValue": "true",
+          "falseValue": "false"
+        }
+      },
+      {
+        "key": "HF_TOKEN",
+        "input": {
+          "name": "Hugging Face token",
+          "type": "string",
+          "description": "Optional — only needed if you replace the public models in models-manifest.txt with gated Hugging Face repositories.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "JOB_TIMEOUT_SECONDS",
+        "input": {
+          "name": "Job timeout (seconds)",
+          "type": "number",
+          "description": "Maximum time a single image job may run before the worker aborts it. Must be less than or equal to the endpoint timeout (600–900 s is the image-stand target).",
+          "min": 120,
+          "max": 3600,
+          "default": 900,
+          "advanced": true
+        }
+      },
+      {
+        "key": "COMFY_BOOT_TIMEOUT_SECONDS",
+        "input": {
+          "name": "ComfyUI boot timeout (seconds)",
+          "type": "number",
+          "description": "How long the worker waits for the local ComfyUI server to become ready.",
+          "min": 60,
+          "max": 1800,
+          "default": 600,
+          "advanced": true
+        }
+      },
+      {
+        "key": "LINK_VOLUME_NODES",
+        "input": {
+          "type": "boolean",
+          "name": "Use custom nodes from the volume",
+          "description": "Symlink custom_nodes from /runpod-volume/custom_nodes into ComfyUI. Leave disabled: FLUX.2 klein and Qwen-Image-Edit-2511 are covered by ComfyUI core in the image.",
+          "default": false,
+          "trueValue": "true",
+          "falseValue": "false",
+          "advanced": true
+        }
+      },
+      {
+        "key": "S3_ENDPOINT",
+        "input": {
+          "name": "S3 endpoint",
+          "type": "string",
+          "description": "Optional S3/MinIO endpoint. Configure S3_* to return large images as presigned image_url instead of inline base64.",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "S3_ACCESS_KEY",
+        "input": {
+          "name": "S3 access key",
+          "type": "string",
+          "description": "S3/MinIO access key (secret — endpoint env only).",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "S3_SECRET_KEY",
+        "input": {
+          "name": "S3 secret key",
+          "type": "string",
+          "description": "S3/MinIO secret key (secret — endpoint env only).",
+          "default": "",
+          "advanced": true
+        }
+      },
+      {
+        "key": "S3_BUCKET",
+        "input": {
+          "name": "S3 bucket",
+          "type": "string",
+          "description": "Bucket for large image output (alias: OUTPUT_BUCKET).",
+          "default": "",
+          "advanced": true
+        }
+      }
+    ]
+  },
+  "version": "v1.0.0",
+  "changelog": "## v1.0.0\n\n- Initial release: ComfyUI serverless image worker (contract `image-serverless/v1`) for the video_gen keyframe step.\n- Executes a prepared ComfyUI API graph unchanged; returns PNG + execution-fact telemetry (gpu_cc/gpu_class, seconds, width/height, model_name, seed, steps, cfg, sampler, scheduler).\n- Edit pipeline: base image and mask delivered as presigned assets into the ComfyUI input directory with sha256/size verification.\n- Network-volume model auto-download (`models-manifest.txt`, `VOLUME_AUTOPOPULATE`): FLUX.2 klein 4B and Qwen-Image-Edit-2511 pinned to immutable Hugging Face commits with sha256.\n- Optional S3 presigned `image_url` delivery for large results.\n"
+}
