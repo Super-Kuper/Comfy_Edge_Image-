@@ -198,8 +198,71 @@ a readable error. It also creates `/runpod-volume/custom_nodes` and
 Volume manifest and boot variables: `models-manifest.txt`; `VOLUME_AUTOPOPULATE`
 (default `true`), `HF_TOKEN` (optional, gated repositories only) and
 `HF_ENDPOINT` (optional mirror; the commit path is preserved). The download
-target is `$VOLUME_ROOT/models`. To add a model: add pinned rows, run
-`populate-volume.sh`, then add its graph template to the catalog (next section).
+target is `$VOLUME_ROOT/models`.
+
+### Adding a new model (weights + image)
+
+Adding a model is two independent changes: **weights on the volume** and a
+**catalog row in video_gen**. Weights are never baked into the image; only the
+manifest and code are, so a weight-only model usually needs one small image
+rebuild.
+
+1. **Pin the files.** Take the Hugging Face repo, a **commit SHA** (not
+   `main`), and the LFS sha256 for every file the graph needs (diffusion model,
+   text encoder, VAE, optional LoRA). Check the model license; the default
+   `commercial_only` catalog mode only allows `commercial` licenses.
+2. **Add rows to [`models-manifest.txt`](models-manifest.txt)** — tab-separated
+   `<models subdir>\t<filename>\t<URL>\t<sha256>`:
+   ```text
+   diffusion_models	my_model_fp8.safetensors	https://huggingface.co/Org/Repo/resolve/<40-hex-commit>/split_files/diffusion_models/my_model_fp8.safetensors	<64-hex-sha256>
+   text_encoders	my_encoder.safetensors	https://huggingface.co/Org/Repo/resolve/<40-hex-commit>/split_files/text_encoders/my_encoder.safetensors	<64-hex-sha256>
+   vae	my_vae.safetensors	https://huggingface.co/Org/Repo/resolve/<40-hex-commit>/split_files/vae/my_vae.safetensors	<64-hex-sha256>
+   ```
+   Filenames must be exactly what the catalog graph references; do not overwrite
+   an existing file with different weights — use a new filename and a new graph
+   revision.
+3. **Rebuild and republish the image.** `models-manifest.txt` is `COPY`-ed into
+   the image, so:
+   ```bash
+   docker build -t <registry>/image-serverless:<new-tag> .
+   docker push <registry>/image-serverless:<new-tag>
+   ```
+   Update the RunPod endpoint image/digest (and `.runpod/hub.json` if the base or
+   CUDA range changes). Without a rebuild you can override the manifest at the
+   endpoint: put the updated file on the volume and set
+   `MANIFEST=/runpod-volume/models-manifest.txt`; this avoids an image build but
+   moves the manifest out of image versioning — prefer the rebuild.
+4. **Populate the volume.** With `VOLUME_AUTOPOPULATE=true` the next cold start
+   downloads only the missing files (sha256-checked, `.tmp` + atomic rename, flock
+   between workers). To avoid a long first job, run
+   `populate-volume.sh` in a temporary CPU pod with the same volume:
+   ```bash
+   VOL_ROOT=/runpod-volume MANIFEST=/opt/image-worker/models-manifest.txt \
+     bash /opt/image-worker/populate-volume.sh
+   ```
+   Check free space first: the current set is ~46 GB; adding a 20 GB edit model
+   to a 60 GB volume needs a resize (network volumes can be grown, not shrunk).
+5. **Register the model in video_gen** (`admin` → `Настройки → Модели
+   изображений`, or `POST /studio/image-models`). Fill `graph` (API-format
+   template + `revision` + `hash`), `model_files` (exact `name`/`path`/`sha256`),
+   `defaults` (steps/cfg/sampler/scheduler/denoise/size), `capabilities`,
+   `license`, `cost` and `environment_id`/`stand_id`. Then run
+   `POST /studio/image-models/{id}/test` (dry graph build) and a live smoke on
+   the stand.
+6. **Verify telemetry.** The worker reports `telemetry.model_name` as the file
+   name from the executed graph; the service accepts the frame only when that
+   name is in `model_files`. If the catalog entry is missing or the graph uses a
+   different filename, the job stops with `keyframe_model_mismatch` — this is
+   intentional, not a silent fallback.
+
+If the model needs **custom nodes** or a newer ComfyUI than the pinned base,
+that is an image-code change: add the node package to
+[`docker/install-comfy-packages.sh`](docker/install-comfy-packages.sh) by commit
+SHA and rebuild, or put nodes on the volume and set `LINK_VOLUME_NODES=true`
+(less reproducible). The base ComfyUI version must support the model's node
+classes; the worker's telemetry parser expects `KSampler*`/`SamplerCustom*`
+with linked scheduler/noise/select/guider nodes and a save node producing
+`images`.
 
 ## Model catalog graphs (`image_models`)
 
