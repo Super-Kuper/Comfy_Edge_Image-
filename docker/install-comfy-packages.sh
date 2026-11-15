@@ -124,14 +124,15 @@ fi
 log "Python ComfyUI: $("${COMFYUI_PYTHON}" -V 2>&1)"
 log "torch из base: $("${COMFYUI_PYTHON}" -c 'import torch; print(torch.__version__, "cuda", torch.version.cuda)' 2>&1 || echo 'import torch FAILED')"
 
-# --- 4. Проверка core-нод моделей -------------------------------------------
+# --- 4. Проверка core-нод моделей и i2i -------------------------------------
 # На этапе сборки ComfyUI ещё не запущен, но имена core-нод можно проверить по
 # исходникам: для двух моделей стенда нужны UNETLoader, CLIPLoader, VAELoader,
-# KSampler, SaveImage, LoadImage, LoadImageMask. Отсутствие — предупреждение
-# (в собранной вручную базе layout может отличаться), но версия ниже проверит
-# совместимость при первом job через comfy_submit_failed.
+# KSampler, SaveImage, LoadImage, LoadImageMask. Для i2i/референса — ImageScale,
+# VAEEncode и TextEncodeQwenImageEdit (Qwen-Image-Edit). Отсутствие —
+# предупреждение (в собранной вручную базе layout может отличаться), но версия
+# ниже проверит совместимость при первом job через comfy_submit_failed.
 _core_nodes_dir="${COMFYUI_DIR}/comfy_extras"
-for node in UNETLoader CLIPLoader VAELoader KSampler SaveImage LoadImage LoadImageMask; do
+for node in UNETLoader CLIPLoader VAELoader KSampler SaveImage LoadImage LoadImageMask VAEEncode ImageScale ImageScaleToTotalPixels TextEncodeQwenImageEdit; do
     if ! grep -Rqs "${node}" "${COMFYUI_DIR}/nodes.py" "${_core_nodes_dir}" 2>/dev/null; then
         warn "core-нода ${node} не найдена в ${COMFYUI_DIR}: проверьте версию ComfyUI"
     fi

@@ -15,9 +15,10 @@
 # Our ENTRYPOINT (docker/entrypoint.sh) starts ComfyUI on 127.0.0.1:8188 and
 # never calls the base /start.sh.
 #
-# Image models: FLUX.2 klein 4B (t2i) and Qwen-Image-Edit-2511 (edit) are covered
-# by ComfyUI core nodes; no custom node packages are installed. See README.md
-# "Custom nodes" if a future model needs a pinned node repository.
+# Image models: FLUX.2 klein 4B (t2i), Qwen-Image-Edit-2511 (edit) and i2i
+# (img2img with a style-reference init image) are covered by ComfyUI core nodes;
+# no custom node packages are installed. See README.md "Custom nodes" if a
+# future model needs a pinned node repository.
 #
 # Structural build without ComfyUI/GPU (CI-like check):
 #   docker build --build-arg BASE_IMAGE=python:3.12-slim \
@@ -48,8 +49,8 @@ ARG COMFYUI_VERSION=v0.44.0
 # =1 — skip ComfyUI installation (structural stub build).
 ARG SKIP_COMFY_PACKAGES=0
 
-# Worker version for logs/labels: --build-arg IMAGE_WORKER_VERSION=1.0.0.
-ARG IMAGE_WORKER_VERSION=1.0.0
+# Worker version for logs/labels: --build-arg IMAGE_WORKER_VERSION=1.1.0.
+ARG IMAGE_WORKER_VERSION=1.1.0
 
 # ARG PYTHONPATH is declared on purpose: it preserves the base image PYTHONPATH
 # when our path is appended below and removes the UndefinedVar build warning.

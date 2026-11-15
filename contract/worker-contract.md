@@ -70,6 +70,23 @@ validates it, the graph decides how the file is used. The base image is never
 overwritten by an edit result: the worker only writes the files listed in
 `assets` and never writes back to the application asset store.
 
+### 1.2. Image-to-image / style reference
+
+Image-to-image uses the same `assets` mechanism: the application sends the style
+reference image as an `image` asset under a fixed name and the graph loads it
+with `LoadImage`. The graph is responsible for scaling (`ImageScale`), encoding
+(`VAEEncode`) and partial denoising (`KSampler.denoise` between `0` and `1`);
+the worker does not change the graph or the denoise. There is no separate `mode`
+field in the contract — `parameter.mode` is tracing data only.
+
+For Qwen-Image-Edit, `TextEncodeQwenImageEdit` takes the reference image and the
+prompt: the reference supplies style, the prompt describes the new frame. The
+example is [`examples/request-i2i.json`](examples/request-i2i.json). The
+application attaches the style reference only when the catalog model declares
+`capabilities.style_reference` and the graph template has the
+`{{style_reference}}` placeholder; otherwise the reference is not sent. The
+worker verifies and writes the file exactly like any other asset.
+
 ## 2. Job output
 
 The handler returns one object that RunPod places in `output` of the status

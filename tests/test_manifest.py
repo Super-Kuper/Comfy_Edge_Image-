@@ -62,7 +62,7 @@ def test_contract_example_graphs_reference_manifest_files() -> None:
     from helpers import contract_dir
 
     volume_files = {row[1] for row in _rows()}
-    for example in ("request.json", "request-edit.json"):
+    for example in ("request.json", "request-edit.json", "request-i2i.json"):
         payload = json.loads((contract_dir() / "examples" / example).read_text(encoding="utf-8"))
         graph = payload["input"]["prompt"]
         for node in graph.values():

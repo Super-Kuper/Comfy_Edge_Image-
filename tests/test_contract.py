@@ -41,7 +41,7 @@ def _assert_invalid(validator: Draft202012Validator, payload: object) -> None:
 # --- Примеры -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["request.json", "request-edit.json", "health.request.json"])
+@pytest.mark.parametrize("name", ["request.json", "request-edit.json", "request-i2i.json", "health.request.json"])
 def test_input_examples_are_valid(input_validator: Draft202012Validator, name: str) -> None:
     input_validator.validate(load_json(contract_dir() / "examples" / name))
 
@@ -96,6 +96,22 @@ def test_edit_request_assets_are_the_graph_names(input_validator: Draft202012Val
         if node["class_type"] in {"LoadImage", "LoadImageMask", "LoadImageOutput"}
     }
     assert names == referenced == {"base.png", "mask.png"}
+
+
+def test_i2i_request_uses_style_reference_as_init_image() -> None:
+    """i2i: референс стиля — входной ``LoadImage``, граф остаётся API-графом."""
+    payload = load_json(contract_dir() / "examples" / "request-i2i.json")
+    names = {asset["name"] for asset in payload["input"]["assets"]}
+    graph = payload["input"]["prompt"]
+    loads = [
+        node["inputs"].get("image")
+        for node in graph.values()
+        if node["class_type"] == "LoadImage"
+    ]
+    assert names == {"style_reference.png"}
+    assert loads == ["style_reference.png"]
+    classes = {node["class_type"] for node in graph.values()}
+    assert {"LoadImage", "ImageScale", "VAEEncode", "KSampler", "SaveImage"} <= classes
 
 
 # --- Выход -------------------------------------------------------------------

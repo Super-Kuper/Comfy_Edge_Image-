@@ -12,7 +12,7 @@ Image models on the stand (both Apache-2.0, commercial use allowed):
 | Model | Mode | Files |
 |---|---|---|
 | FLUX.2 klein 4B | t2i (generate) | diffusion model + Qwen3-4B text encoder + FLUX.2 VAE |
-| Qwen-Image-Edit-2511 | edit (instruction + optional mask) | fp8mixed diffusion model + Qwen2.5-VL text encoder + Qwen-Image VAE |
+| Qwen-Image-Edit-2511 | edit (instruction + optional mask) и i2i (style-reference init image) | fp8mixed diffusion model + Qwen2.5-VL text encoder + Qwen-Image VAE |
 
 ## Deploy
 
@@ -56,8 +56,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.0.0 .
-docker push <registry>/image-serverless:1.0.0
+docker build -t <registry>/image-serverless:1.1.0 .
+docker push <registry>/image-serverless:1.1.0
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -69,7 +69,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.0.0`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.1.0`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -97,9 +97,10 @@ Submit to the endpoint's `/run` API; minimal shape (abbreviated graph):
 
 More examples: [`request.json`](contract/examples/request.json) (t2i),
 [`request-edit.json`](contract/examples/request-edit.json) (edit with base image
-and mask). The graphs there are illustrative: they show the required shape and
-the node facts the worker measures; the actual templates live in the
-`image_models` catalog.
+and mask), [`request-i2i.json`](contract/examples/request-i2i.json) (i2i:
+style-reference image as init image). The graphs there are illustrative: they
+show the required shape and the node facts the worker measures; the actual
+templates live in the `image_models` catalog.
 
 ### Edit assets
 
@@ -118,6 +119,27 @@ graph template must reference exactly those names in `LoadImage` /
 `LoadImageMask`. The examples above use short illustrative names. The worker
 verifies `sha256`/size, writes the files atomically and never uploads the edit
 result over the source asset (the application stores the new variant).
+
+### i2i / style reference
+
+The same assets mechanism covers image-to-image: the application sends a style
+reference image as an `image` asset, the graph loads it with `LoadImage`, scales
+it to the target canvas (`ImageScale`), encodes it with `VAEEncode` and samples
+with a partially denoised latent (`KSampler.denoise` below `1.0`). For
+Qwen-Image-Edit the conditioning comes from `TextEncodeQwenImageEdit` with the
+same image input, so the prompt describes the new scene while the reference
+supplies palette, light and texture. See
+[`request-i2i.json`](contract/examples/request-i2i.json).
+
+This is core ComfyUI nodes only: the image needs no new custom-node package or
+weights for i2i, and `docker/install-comfy-packages.sh` verifies
+`LoadImage`, `ImageScale`, `VAEEncode` and `TextEncodeQwenImageEdit` at build
+time. A style reference is an **input**, not a generation result: it is attached
+only when the catalog model declares `capabilities.style_reference` and the
+graph template contains the `{{style_reference}}` placeholder. The denoise
+strength is a model default; if it is too low the output keeps too much of the
+reference composition, if too high the style drifts — smoke-test it on the
+stand before setting `tested_at`.
 
 ## Job output
 
@@ -301,6 +323,13 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
 6. **For edit models**, pass the base image and mask through `assets` with the
    names the edit template references (`LoadImage`/`LoadImageMask`), and set
    `capabilities.edit_modes` to `instruction` and/or `mask`.
+7. **For i2i style-reference models**, set
+   `capabilities.style_reference=true` and, if the graph has no t2i branch,
+   `style_reference_required=true`; include `{{style_reference}}` in the
+   template (`LoadImage → ImageScale → VAEEncode → KSampler`). The application
+   sends the style reference in `assets` and does not start the frame without it
+   (`style_reference_missing`). The image already has the core nodes; no new
+   package is needed.
 7. **Test the model** with `POST /studio/image-models/{id}/test` (admin), then set
    `tested_at`. A row without a successful test is visible as untested in the
    catalog.
