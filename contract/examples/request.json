@@ -42,7 +42,7 @@
         }
       },
       "6": {
-        "class_type": "EmptySD3LatentImage",
+        "class_type": "EmptyFlux2LatentImage",
         "inputs": {
           "width": 768,
           "height": 1344,

@@ -20,11 +20,11 @@ JSON Schemas and examples:
 ```json
 {
   "input": {
-    "prompt": {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b.safetensors"}}},
+    "prompt": {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b.safetensors", "weight_dtype": "default"}}},
     "parameter": {"mode": "generate", "width": 768, "height": 1344, "seed": 20261113},
     "acceleration": {"gpu_class": "RTX A6000", "use_turbo": false}
   },
-  "policy": {"executionTimeout": 900000, "ttl": 900000}
+  "policy": {"executionTimeout": 900000, "ttl": 3600000}
 }
 ```
 

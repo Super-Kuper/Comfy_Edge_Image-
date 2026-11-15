@@ -29,11 +29,17 @@ Image models on the stand (both Apache-2.0, commercial use allowed):
    **Max workers = 1–2**, idle timeout short (for example 5–10 s) and endpoint
    timeout **600–900 s** (the worker's `JOB_TIMEOUT_SECONDS` must be less than or
    equal to it). One warm worker that already loaded the model beats several
-   cold ones; a second worker only helps for queued bursts.
-4. **Wait for the first boot.** With `VOLUME_AUTOPOPULATE=true` (default) the
-   container downloads missing files from
+   cold ones; a second worker only helps for queued bursts. Keep the endpoint
+   timeout above the worker job timeout: RunPod kills the run when either
+   expires.
+4. **Populate the volume before traffic.** With `VOLUME_AUTOPOPULATE=true`
+   (default) the container downloads missing files from
    [`models-manifest.txt`](models-manifest.txt) into
-   `/runpod-volume/models`; later boots reuse the volume.
+   `/runpod-volume/models`; later boots reuse the volume. The first download of
+   ~46 GB takes tens of minutes, and a job submitted meanwhile can sit in the
+   queue longer than the app's `policy.ttl` — RunPod then answers `404` on
+   `status` (`run not found`). Pre-populate with the CPU pod recipe above or
+   keep `min workers = 1` while the volume is cold.
 5. **Smoke-test** with the health action (see [Health](#health)); RunPod Hub runs
    this test on build ([`.runpod/tests.json`](.runpod/tests.json)).
 6. **Keep secrets in the endpoint environment only** (`S3_*` for large results,
@@ -56,8 +62,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.1.0 .
-docker push <registry>/image-serverless:1.1.0
+docker build -t <registry>/image-serverless:1.1.1 .
+docker push <registry>/image-serverless:1.1.1
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -69,7 +75,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.1.0`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.1.1`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -198,6 +204,15 @@ Cancelling a job interrupts the running graph in ComfyUI, so the GPU is not kept
 busy. Keep the endpoint timeout at or above `JOB_TIMEOUT_SECONDS` (default 900).
 Full contract: [`contract/worker-contract.md`](contract/worker-contract.md).
 
+The **video_gen** side sends `policy.executionTimeout` = keyframe timeout (900 s)
+and `policy.ttl` = `KEYFRAME_JOB_TTL_SECONDS` (3600 s): TTL must cover both the
+queue and the execution. A `404` from `/v2/{endpoint}/status/{run}` means the run
+is not registered for that endpoint — the endpoint was recreated while the job
+was in flight or the job expired and was purged; it is not a graph error. The
+app repeats the poll a few times (a run may not be registered immediately) and
+reports the response body plus endpoint/run ids, so the card shows the real
+cause.
+
 ## Models on the network volume
 
 Models are not shipped in the image. On first boot `populate-volume.sh`
@@ -297,21 +312,29 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
    `edit_modes`, `sizes`, `seed`, `negative_prompt`), `defaults`, `graph` and
    `model_files`.
 2. **Fill `model_files`** with the pinned files of the model (`name`, `path`,
-   `sha256`) exactly as they land on the volume. This is not optional: the
-   worker reports `telemetry.model_name` as the file name from the executed
-   graph, while the snapshot stores the model `slug`; the pipeline accepts the
-   frame only when that file name is present in `model_files[].name/path`.
-   Without `model_files` the frame is rejected with
-   `keyframe_model_mismatch`.
-3. **Put the API-format graph template into `graph`**: `revision`, t2i template
-   and optional edit template, `hash`. The service renders the template
-   (`{{prompt}}`, `{{width}}`, `{{height}}`, `{{seed}}`, `{{steps}}`, `{{cfg}}`,
-   `{{sampler}}`, `{{scheduler}}`, `{{model_files...}}`, `{{assets...}}`) and
-   sends the finished graph. The worker does not know about placeholders.
+   `sha256`) exactly as they land on the volume — the diffusion model **and**
+   its text encoder/VAE. This is not optional: the worker reports
+   `telemetry.model_name` as the file name from the executed graph, while the
+   snapshot stores the model `slug`; the pipeline accepts the frame only when
+   that file name is present in `model_files[].name/path`. Without
+   `model_files` the template placeholder `{{model_file}}` stops the job with
+   `image_model_files_missing` and the frame is rejected with
+   `keyframe_model_mismatch` (`{{model_file}}` is resolved from the
+   `diffusion_models/`/`checkpoints/` entry, never from the slug).
+3. **Put the API-format graph template into `graph`**: `revision`, `template`,
+   `hash`. The service renders the template and sends the finished graph; the
+   worker does not know about placeholders. Placeholders are `{{prompt}}`,
+   `{{negative_prompt}}`, `{{instruction}}`, `{{strength}}`, `{{width}}`,
+   `{{height}}`, `{{seed}}`, `{{steps}}`, `{{cfg}}`, `{{sampler}}`,
+   `{{scheduler}}`, `{{denoise}}`, `{{filename_prefix}}`, `{{model_file}}`,
+   `{{base_image}}`, `{{mask}}`, `{{anchor}}`, `{{style_reference}}`.
 4. **Respect the telemetry contract**, otherwise the job fails visibly:
    - the sampler is `KSampler`, `KSamplerAdvanced`, `SamplerCustom` or
      `SamplerCustomAdvanced` with its linked `RandomNoise` / `BasicScheduler` /
-     `KSamplerSelect` / `CFGGuider` nodes;
+     `KSamplerSelect` / `CFGGuider` nodes. FLUX.2's native `Flux2Scheduler` is
+     **not** in the telemetry parser yet: a graph with it fails with
+     `telemetry_missing` (scheduler), so use `KSampler` (euler/simple) or extend
+     the worker parser;
    - the diffusion model is loaded by `UNETLoader`/`UnetLoaderGGUF*` or
      `CheckpointLoader*` (for `model_name`);
    - the graph ends in a save node producing an `images` entry (`SaveImage`).
@@ -321,8 +344,9 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
    compares them with the returned telemetry and stops the step on a deviation
    (the worker never substitutes expected values for facts).
 6. **For edit models**, pass the base image and mask through `assets` with the
-   names the edit template references (`LoadImage`/`LoadImageMask`), and set
-   `capabilities.edit_modes` to `instruction` and/or `mask`.
+   names the edit template references (`LoadImage`/`LoadImageMask`), scale the
+   base to the snapshot canvas (`ImageScale`) so the measured size equals the
+   snapshot, and set `capabilities.edit_modes` to `instruction` and/or `mask`.
 7. **For i2i style-reference models**, set
    `capabilities.style_reference=true` and, if the graph has no t2i branch,
    `style_reference_required=true`; include `{{style_reference}}` in the
@@ -330,9 +354,36 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
    sends the style reference in `assets` and does not start the frame without it
    (`style_reference_missing`). The image already has the core nodes; no new
    package is needed.
-7. **Test the model** with `POST /studio/image-models/{id}/test` (admin), then set
-   `tested_at`. A row without a successful test is visible as untested in the
-   catalog.
+8. **Check the graph, then get a live frame.** `POST
+   /studio/image-models/{id}/test` (admin) is a **static lint without GPU**: it
+   renders every branch (t2i, edit with/without mask, i2i), checks node classes,
+   link indices/types, required inputs (`weight_dtype`), asset names and pinned
+   `model_files`, and returns `409 image_model_graph_invalid` with the exact
+   problems. It does **not** set `tested_at`: that date is set only by the first
+   successful **live** keyframe (the smoke test on the stand), so a row is never
+   marked "tested" just because the template rendered. A row without a live
+   frame is visible as untested in the catalog.
+
+### Graph gotchas for the shipped models
+
+- **FLUX.2 klein 4B (t2i)**: split loaders are mandatory —
+  `UNETLoader(flux-2-klein-4b.safetensors, weight_dtype=default)` +
+  `CLIPLoader(qwen_3_4b.safetensors, type=flux2)` + `VAELoader(flux2-vae.safetensors)`.
+  The latent node must be `EmptyFlux2LatentImage` (128 channels, size multiple
+  of 16): `EmptyLatentImage`/`EmptySD3LatentImage` give 4/16 channels and fail
+  at the sampler. `weight_dtype` is required by ComfyUI 0.44.
+- **Qwen-Image-Edit-2511 (edit)**: `UNETLoader` + `CLIPLoader(type=qwen_image)`
+  + `VAELoader`, base image via `LoadImage` → `ImageScale` → `VAEEncode`,
+  conditioning via `TextEncodeQwenImageEdit`, optional mask via
+  `LoadImageMask(channel=red)`/`SetLatentNoiseMask`. Use `defaults.strength`
+  ~0.85 for instruction edits (it renders into KSampler `denoise`); 0.35 barely
+  changes the frame.
+- **Qwen-Image-Edit-2511 i2i (style reference)**: same loaders, reference via
+  `LoadImage` → `ImageScale` → `VAEEncode`, denoise ~0.65, conditioning
+  `TextEncodeQwenImageEdit` with the reference image.
+
+Both shipped templates are covered by `graph_lint` tests in video_gen; the
+ComfyUI node classes themselves are still verified only on a live stand.
 
 Example catalog row (abbreviated):
 
@@ -345,10 +396,12 @@ Example catalog row (abbreviated):
   "license": "commercial",
   "license_url": "https://huggingface.co/Comfy-Org/Qwen-Image-Edit",
   "capabilities": {"supports_edit": true, "edit_modes": ["instruction", "mask"], "sizes": [[768, 1344]], "seed": true, "negative_prompt": true},
-  "defaults": {"width": 768, "height": 1344, "steps": 20, "cfg": 2.5, "sampler": "euler", "scheduler": "simple", "edit_strength": 0.85},
-  "graph": {"revision": 2, "hash": "<sha256>", "t2i": null, "edit": {"...": "API graph template"}},
+  "defaults": {"width": 768, "height": 1344, "steps": 20, "cfg": 2.5, "sampler": "euler", "scheduler": "simple", "strength": 0.85},
+  "graph": {"revision": "qwen-image-edit-2511-v2", "hash": "<sha256>", "template": {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "{{model_file}}", "weight_dtype": "default"}}, "...": "API graph template"}},
   "model_files": [
-    {"name": "qwen_image_edit_2511_fp8mixed.safetensors", "path": "diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "sha256": "..."}
+    {"name": "qwen_image_edit_2511_fp8mixed.safetensors", "path": "diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors", "sha256": "..."},
+    {"name": "qwen_2.5_vl_7b_fp8_scaled.safetensors", "path": "text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors", "sha256": "..."},
+    {"name": "qwen_image_vae.safetensors", "path": "vae/qwen_image_vae.safetensors", "sha256": "..."}
   ]
 }
 ```

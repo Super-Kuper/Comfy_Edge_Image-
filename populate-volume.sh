@@ -57,16 +57,21 @@ fi
 
 # --- Инструменты -------------------------------------------------------------
 
-SHA_BIN=""
+#: Команда хеша — массив, чтобы "shasum -a 256" не разбирался на два слова.
+SHA_CMD=()
 if command -v sha256sum >/dev/null 2>&1; then
-    SHA_BIN="sha256sum"
+    SHA_CMD=(sha256sum)
 elif command -v shasum >/dev/null 2>&1; then
-    SHA_BIN="shasum -a 256"
+    SHA_CMD=(shasum -a 256)
 fi
 
 _sha256() {
-    # shellcheck disable=SC2086 - SHA_BIN может быть "shasum -a 256"
-    ${SHA_BIN} "$1" | awk '{print $1}'
+    # Печатает хеш; ненулевой код — сбой инструмента/ФС (например, ERANGE на
+    # большом файле сетевого тома). Вызывающий обязан отличать это от
+    # расхождения хешей: сбой инструмента не повод удалять скачанный файл.
+    local out
+    out="$("${SHA_CMD[@]}" -- "$1")" || return 1
+    printf '%s\n' "${out%% *}"
 }
 
 # --- Раскрытие ${VAR} в URL ---------------------------------------------------
@@ -131,7 +136,7 @@ _state_set() {
 
 # --- Старт -------------------------------------------------------------------
 
-if [[ -z "${SHA_BIN}" ]]; then
+if [[ ${#SHA_CMD[@]} -eq 0 ]]; then
     warn "нет sha256sum/shasum — проверка sha256 невозможна; pinned sha256 в манифесте обязателен, проверьте образ"
 fi
 
@@ -205,8 +210,12 @@ while IFS=$'\t' read -r sub name url sha extra; do
         if [[ -z "${expected}" ]]; then
             expected="$(_state_hash "${key}")"
         fi
-        if [[ -n "${expected}" && -n "${SHA_BIN}" ]]; then
-            actual="$(_sha256 "${dest}")"
+        if [[ -n "${expected}" && ${#SHA_CMD[@]} -gt 0 ]]; then
+            if ! actual="$(_sha256 "${dest}")"; then
+                warn "[${done_n}/${total}] ${key}: sha256 не посчитан (сбой инструмента/ФС) — файл оставляю без проверки"
+                failed=$((failed + 1))
+                continue
+            fi
             if [[ "${actual}" == "${expected}" ]]; then
                 log "[${done_n}/${total}] есть ${key} (sha256 ok)"
                 skipped=$((skipped + 1))
@@ -217,8 +226,12 @@ while IFS=$'\t' read -r sub name url sha extra; do
         else
             # Нет пина и нет состояния: фиксируем фактический хеш при первом
             # заполнении тома, дальше проверяем по нему.
-            if [[ -n "${SHA_BIN}" ]]; then
-                actual="$(_sha256 "${dest}")"
+            if [[ ${#SHA_CMD[@]} -gt 0 ]]; then
+                if ! actual="$(_sha256 "${dest}")"; then
+                    warn "[${done_n}/${total}] ${key}: sha256 не посчитан (сбой инструмента/ФС) — файл оставляю без проверки"
+                    failed=$((failed + 1))
+                    continue
+                fi
                 size="$(stat -c %s "${dest}" 2>/dev/null || stat -f %z "${dest}" 2>/dev/null || echo 0)"
                 _state_set "${key}" "${actual}" "${size}"
                 log "[${done_n}/${total}] есть ${key}: sha256 ${actual} зафиксирован в состоянии тома"
@@ -247,8 +260,12 @@ while IFS=$'\t' read -r sub name url sha extra; do
         continue
     fi
 
-    if [[ -n "${sha}" && -n "${SHA_BIN}" ]]; then
-        actual="$(_sha256 "${dest}.tmp")"
+    if [[ -n "${sha}" && ${#SHA_CMD[@]} -gt 0 ]]; then
+        if ! actual="$(_sha256 "${dest}.tmp")"; then
+            warn "${where}: sha256 не посчитан (сбой инструмента/ФС) — .tmp оставлен для повторной проверки, а не удалён"
+            failed=$((failed + 1))
+            continue
+        fi
         if [[ "${actual}" != "${sha}" ]]; then
             warn "${where}: sha256 ${actual} != pinned ${sha} — файл повреждён/подменён, удаляю .tmp"
             rm -f "${dest}.tmp"
@@ -264,7 +281,17 @@ while IFS=$'\t' read -r sub name url sha extra; do
         failed=$((failed + 1))
         continue
     fi
-    [[ -n "${SHA_BIN}" ]] && _state_set "${key}" "${sha:-$(_sha256 "${dest}")}" "${size}"
+    if [[ ${#SHA_CMD[@]} -gt 0 ]]; then
+        final_sha="${sha}"
+        if [[ -z "${final_sha}" ]]; then
+            final_sha="$(_sha256 "${dest}" || true)"
+        fi
+        # Пустой хеш (сбой инструмента) не пишем в состояние: иначе следующий
+        # boot считал бы файл «зафиксированным» без проверки.
+        if [[ -n "${final_sha}" ]]; then
+            _state_set "${key}" "${final_sha}" "${size}"
+        fi
+    fi
     log "[${done_n}/${total}] готово ${key} (${size} байт)"
 done <"${MANIFEST}"
 
