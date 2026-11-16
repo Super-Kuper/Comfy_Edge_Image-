@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "image-serverless-worker"
-version = "1.1.1"
-description = "RunPod serverless worker for ComfyUI image generation/editing (FLUX.2 klein 4B, Qwen-Image-Edit-2511)"
+version = "1.1.2"
+description = "RunPod serverless worker for ComfyUI image generation/editing (FLUX.2 klein 4B, Qwen-Image-2512, Qwen-Image-Edit-2511)"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "video_gen image serverless worker" }]
-keywords = ["runpod", "serverless", "comfyui", "image", "keyframe", "flux2", "qwen-image"]
+keywords = ["runpod", "serverless", "comfyui", "image", "keyframe", "flux2", "qwen-image", "qwen-image-2512"]
 classifiers = [
     "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",

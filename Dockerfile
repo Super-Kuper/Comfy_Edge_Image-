@@ -49,8 +49,8 @@ ARG COMFYUI_VERSION=v0.44.0
 # =1 — skip ComfyUI installation (structural stub build).
 ARG SKIP_COMFY_PACKAGES=0
 
-# Worker version for logs/labels: --build-arg IMAGE_WORKER_VERSION=1.1.1.
-ARG IMAGE_WORKER_VERSION=1.1.1
+# Worker version for logs/labels: --build-arg IMAGE_WORKER_VERSION=1.1.2.
+ARG IMAGE_WORKER_VERSION=1.1.2
 
 # ARG PYTHONPATH is declared on purpose: it preserves the base image PYTHONPATH
 # when our path is appended below and removes the UndefinedVar build warning.

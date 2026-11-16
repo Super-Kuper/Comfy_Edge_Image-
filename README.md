@@ -1,4 +1,4 @@
-# Image Serverless — ComfyUI worker for FLUX.2 klein / Qwen-Image-Edit
+# Image Serverless — ComfyUI worker for FLUX.2 klein / Qwen-Image-2512 / Qwen-Image-Edit
 
 RunPod serverless worker for the video_gen **keyframe** step. It runs ComfyUI
 v0.44.0 on one 48 GB image GPU, executes a **prepared ComfyUI API graph** built
@@ -7,19 +7,24 @@ telemetry. It does not build or modify the graph, does not ship model weights an
 keeps ComfyUI on loopback only. Contract: **`image-serverless/v1`** —
 [`contract/worker-contract.md`](contract/worker-contract.md).
 
-Image models on the stand (both Apache-2.0, commercial use allowed):
+Image models on the stand (all Apache-2.0, commercial use allowed):
 
 | Model | Mode | Files |
 |---|---|---|
 | FLUX.2 klein 4B | t2i (generate) | diffusion model + Qwen3-4B text encoder + FLUX.2 VAE |
+| Qwen-Image-2512 | t2i (generate) | fp8 diffusion model + Qwen2.5-VL text encoder + Qwen-Image VAE |
 | Qwen-Image-Edit-2511 | edit (instruction + optional mask) и i2i (style-reference init image) | fp8mixed diffusion model + Qwen2.5-VL text encoder + Qwen-Image VAE |
+
+The two Qwen models reuse the same text encoder and VAE; only the diffusion
+weights differ.
 
 ## Deploy
 
-1. **Storage first.** Create a network volume of at least **60 GB**
-   (100 GB recommended) in a datacenter that offers 48 GB image GPUs
-   (`AMPERE_48` — RTX A6000/A40, `ADA_48_PRO` — L40S/L40/RTX 6000 Ada). The
-   pinned model set is ~46.3 GB; the volume also holds future models.
+1. **Storage first.** Create a network volume of at least **100 GB** in a
+   datacenter that offers 48 GB image GPUs (`AMPERE_48` — RTX A6000/A40,
+   `ADA_48_PRO` — L40S/L40/RTX 6000 Ada). The pinned model set is ~66.7 GB; the
+   volume also holds ComfyUI outputs/temporary files and future models. The old
+   60 GB minimum is no longer enough for the current manifest.
 2. **Deploy the worker.** Publish this repository as a GitHub release to
    [RunPod Hub](https://console.runpod.io/hub) (metadata:
    [`.runpod/hub.json`](.runpod/hub.json) — `AMPERE_48,ADA_48_PRO`,
@@ -36,7 +41,7 @@ Image models on the stand (both Apache-2.0, commercial use allowed):
    (default) the container downloads missing files from
    [`models-manifest.txt`](models-manifest.txt) into
    `/runpod-volume/models`; later boots reuse the volume. The first download of
-   ~46 GB takes tens of minutes, and a job submitted meanwhile can sit in the
+   ~67 GB takes tens of minutes, and a job submitted meanwhile can sit in the
    queue longer than the app's `policy.ttl` — RunPod then answers `404` on
    `status` (`run not found`). Pre-populate with the CPU pod recipe above or
    keep `min workers = 1` while the volume is cold.
@@ -49,9 +54,9 @@ Image models on the stand (both Apache-2.0, commercial use allowed):
 
 | Item | Requirement |
 |---|---|
-| GPU | 48 GB recommended: L40S (`ADA_48_PRO`) primary, RTX A6000 (`AMPERE_48`) cheap fallback. 32 GB works with fp8mixed on Qwen-Image-Edit-2511 but leaves little headroom; 24 GB is not supported by this manifest. |
+| GPU | 48 GB recommended: L40S (`ADA_48_PRO`) primary, RTX A6000 (`AMPERE_48`) cheap fallback. 32 GB works with fp8 Qwen-Image models but leaves little headroom; 24 GB is not supported by this manifest. |
 | CUDA, endpoint | The image is built on a CUDA 13.0 ComfyUI base pinned by digest (see [Dockerfile](Dockerfile)). Host drivers must support CUDA 13.0 (13.0–13.4 are accepted by the Hub metadata). If the chosen 48 GB pool only advertises CUDA 12.x drivers, rebuild on a CUDA 12.x ComfyUI base and re-pin the digest + `.runpod/hub.json` `allowedCudaVersions`. |
-| Network volume | at least 60 GB at `/runpod-volume` (100 GB recommended) |
+| Network volume | at least 100 GB at `/runpod-volume` (the pinned set is ~66.7 GB) |
 | Registry | The built image must be available to RunPod (Hub build or your registry) |
 | ComfyUI core | Image models are served by ComfyUI core nodes; the image installs no custom-node packages. |
 
@@ -62,8 +67,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.1.1 .
-docker push <registry>/image-serverless:1.1.1
+docker build -t <registry>/image-serverless:1.1.2 .
+docker push <registry>/image-serverless:1.1.2
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -75,7 +80,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.1.1`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.1.2`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -228,6 +233,7 @@ a readable error. It also creates `/runpod-volume/custom_nodes` and
 | `diffusion_models/flux-2-klein-4b.safetensors` | [Comfy-Org/Flux-2-Klein-4B](https://huggingface.co/Comfy-Org/Flux-2-Klein-4B) @ `5b3abca5` | 7.75 GB |
 | `text_encoders/qwen_3_4b.safetensors` | same repository | 8.04 GB |
 | `vae/flux2-vae.safetensors` | same repository | 0.34 GB |
+| `diffusion_models/qwen_image_2512_fp8_e4m3fn.safetensors` | [Comfy-Org/Qwen-Image](https://huggingface.co/Comfy-Org/Qwen-Image) @ `1f12b17b` | 20.43 GB |
 | `diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors` | [Comfy-Org/Qwen-Image-Edit](https://huggingface.co/Comfy-Org/Qwen-Image-Edit) @ `f68ace85` | 20.53 GB |
 | `text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors` | [Comfy-Org/Qwen-Image](https://huggingface.co/Comfy-Org/Qwen-Image) @ `1f12b17b` | 9.38 GB |
 | `vae/qwen_image_vae.safetensors` | same repository | 0.25 GB |
@@ -277,8 +283,9 @@ rebuild.
    VOL_ROOT=/runpod-volume MANIFEST=/opt/image-worker/models-manifest.txt \
      bash /opt/image-worker/populate-volume.sh
    ```
-   Check free space first: the current set is ~46 GB; adding a 20 GB edit model
-   to a 60 GB volume needs a resize (network volumes can be grown, not shrunk).
+   Check free space first: the current set is ~66.7 GB; adding another 20 GB
+   model to a 100 GB volume needs a resize check (network volumes can be grown,
+   not shrunk).
 5. **Register the model in video_gen** (`admin` → `Настройки → Модели
    изображений`, or `POST /studio/image-models`). Fill `graph` (API-format
    template + `revision` + `hash`), `model_files` (exact `name`/`path`/`sha256`),
@@ -372,6 +379,13 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
   The latent node must be `EmptyFlux2LatentImage` (128 channels, size multiple
   of 16): `EmptyLatentImage`/`EmptySD3LatentImage` give 4/16 channels and fail
   at the sampler. `weight_dtype` is required by ComfyUI 0.44.
+- **Qwen-Image-2512 (t2i)**: `UNETLoader` + `CLIPLoader(type=qwen_image)` +
+  `VAELoader(qwen_image_vae.safetensors)`, `CLIPTextEncode` positive/negative,
+  `EmptySD3LatentImage` (16-channel latent) and the required
+  `ModelSamplingAuraFlow(shift=3.1)` before `KSampler`; without the AuraFlow
+  node Qwen-Image produces noise. The diffusion file is
+  `qwen_image_2512_fp8_e4m3fn.safetensors`; the text encoder and VAE are shared
+  with Qwen-Image-Edit. Defaults from the model card: 50 steps / CFG 4.0.
 - **Qwen-Image-Edit-2511 (edit)**: `UNETLoader` + `CLIPLoader(type=qwen_image)`
   + `VAELoader`, base image via `LoadImage` → `ImageScale` → `VAEEncode`,
   conditioning via `TextEncodeQwenImageEdit`, optional mask via
@@ -382,7 +396,7 @@ The admin flow (see `docs/tasks/2026-11-12-keyframe-implementation.md`):
   `LoadImage` → `ImageScale` → `VAEEncode`, denoise ~0.65, conditioning
   `TextEncodeQwenImageEdit` with the reference image.
 
-Both shipped templates are covered by `graph_lint` tests in video_gen; the
+All shipped templates are covered by `graph_lint` tests in video_gen; the
 ComfyUI node classes themselves are still verified only on a live stand.
 
 Example catalog row (abbreviated):
@@ -409,9 +423,9 @@ Example catalog row (abbreviated):
 ## Custom nodes
 
 The image is built on `runpod/comfyui:2.2.0-comfyuiv0.44.0-cuda13.0` pinned by
-digest; FLUX.2 klein 4B and Qwen-Image-Edit-2511 are covered by ComfyUI core
-nodes, so **no custom-node packages are installed**. If a future model needs a
-node package, add it to
+digest; FLUX.2 klein 4B and Qwen-Image-2512 / Qwen-Image-Edit-2511 are covered by
+ComfyUI core nodes, so **no custom-node packages are installed**. If a future
+model needs a node package, add it to
 [`docker/install-comfy-packages.sh`](docker/install-comfy-packages.sh) **by
 commit SHA** (never by `main`) and list it here with its license. Alternatively,
 put nodes on the volume and enable `LINK_VOLUME_NODES=true`; the image's own
@@ -467,25 +481,26 @@ executed while building this repository:
 - **GPU inference** — no GPU here, so no graph was executed on ComfyUI and the
   real `gpu_cc`/`gpu_class`, timing and memory behaviour are untested.
 - **ComfyUI core node classes for these models** — the exact node set used by
-  FLUX.2 klein 4B / Qwen-Image-Edit-2511 at ComfyUI v0.44.0 must be confirmed on
-  the first smoke run. The worker requires the sampler/loader classes listed in
-  the contract to measure telemetry; if the catalog graph uses other classes,
-  the job fails with `telemetry_missing` (visible, not silent) and the contract
-  must be extended.
+  FLUX.2 klein 4B / Qwen-Image-2512 / Qwen-Image-Edit-2511 at ComfyUI v0.44.0
+  must be confirmed on the first smoke run. The worker requires the
+  sampler/loader classes listed in the contract to measure telemetry; if the
+  catalog graph uses other classes, the job fails with `telemetry_missing`
+  (visible, not silent) and the contract must be extended.
 - **CUDA 13.0 base vs. 48 GB pools** — if `AMPERE_48`/`ADA_48_PRO` hosts only
   advertise CUDA 12.x drivers, the pinned base will not start; rebuild on a
   CUDA 12.x ComfyUI image and re-pin the digest and `allowedCudaVersions`.
 - **Model downloads** — pinned revisions and sha256 come from the public
-  Hugging Face metadata; the ~46 GB download itself was not run. A wrong mirror
-  (`HF_ENDPOINT`) that drops the commit path fails the pin check by design.
+  Hugging Face metadata; the ~66.7 GB download itself was not run. A wrong
+  mirror (`HF_ENDPOINT`) that drops the commit path fails the pin check by
+  design.
 - **Hub validation** — `.runpod/hub.json` was not pushed to RunPod Hub, so GPU
   pool availability and endpoint auto-configuration are unverified.
 - **S3 presigned `image_url`** — the path is unit-tested with a fake storage
   backend, but no live S3/MinIO presign was exercised.
-- **Memory** — Qwen-Image-Edit-2511 (fp8mixed, 20.5 GB) + 9.4 GB text encoder on
-  a 48 GB card leaves little headroom; ComfyUI may offload parts. Long batches
-  of variants are better served by one warm worker (max workers 1–2) than by
-  parallel cold workers.
+- **Memory** — any Qwen-Image 20B model (fp8, ~20.4–20.5 GB) + 9.4 GB text
+  encoder on a 48 GB card leaves little headroom; ComfyUI may offload parts.
+  Long batches of variants are better served by one warm worker (max workers
+  1–2) than by parallel cold workers.
 - **OCR** — not implemented by the worker; the service must record
   `text_detected` itself. `keyframe_text_detected` is a pipeline deviation, not
   a worker error.
@@ -496,5 +511,5 @@ Worker code is MIT (see [LICENSE](LICENSE)). The image includes ComfyUI
 (GPL-3.0) and the NVIDIA CUDA/PyTorch components of the base image under their
 own terms. Model weights are not part of this repository or the image: they are
 downloaded by the operator to a network volume and remain governed by their
-Hugging Face repository licenses (FLUX.2 klein 4B and Qwen-Image-Edit-2511 are
-Apache-2.0; review them before use).
+Hugging Face repository licenses (FLUX.2 klein 4B, Qwen-Image-2512 and
+Qwen-Image-Edit-2511 are Apache-2.0; review them before use).

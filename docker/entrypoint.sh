@@ -343,7 +343,7 @@ _start_handler() {
 # --- Точка входа -------------------------------------------------------------
 
 main() {
-    log "image-serverless worker ${IMAGE_WORKER_VERSION} (ComfyUI + FLUX.2 klein / Qwen-Image-Edit)"
+    log "image-serverless worker ${IMAGE_WORKER_VERSION} (ComfyUI + FLUX.2 klein / Qwen-Image-2512 / Qwen-Image-Edit)"
     log "COMFYUI_DIR=${COMFYUI_DIR} COMFYUI_PYTHON=${COMFYUI_PYTHON:-<авто>} COMFY_URL=${COMFY_URL} VOLUME_ROOT=${VOLUME_ROOT} LINK_VOLUME_NODES=${LINK_VOLUME_NODES} VOLUME_AUTOPOPULATE=${VOLUME_AUTOPOPULATE}"
 
     # Ранняя диагностика: на stub-базе (python:3.12-slim) ComfyUI нет — явная

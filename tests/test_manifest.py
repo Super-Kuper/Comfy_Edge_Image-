@@ -49,6 +49,7 @@ def test_expected_layout_and_models() -> None:
     assert by_name["flux-2-klein-4b.safetensors"] == "diffusion_models"
     assert by_name["qwen_3_4b.safetensors"] == "text_encoders"
     assert by_name["flux2-vae.safetensors"] == "vae"
+    assert by_name["qwen_image_2512_fp8_e4m3fn.safetensors"] == "diffusion_models"
     assert by_name["qwen_image_edit_2511_fp8mixed.safetensors"] == "diffusion_models"
     assert by_name["qwen_2.5_vl_7b_fp8_scaled.safetensors"] == "text_encoders"
     assert by_name["qwen_image_vae.safetensors"] == "vae"
