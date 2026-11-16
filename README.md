@@ -32,11 +32,12 @@ weights differ.
    serverless endpoint yourself.
 3. **Attach the volume** at `/runpod-volume`, use endpoint type **`QUEUE`**,
    **Max workers = 1–2**, idle timeout short (for example 5–10 s) and endpoint
-   timeout **600–900 s** (the worker's `JOB_TIMEOUT_SECONDS` must be less than or
-   equal to it). One warm worker that already loaded the model beats several
-   cold ones; a second worker only helps for queued bursts. Keep the endpoint
-   timeout above the worker job timeout: RunPod kills the run when either
-   expires.
+   timeout **at least `JOB_TIMEOUT_SECONDS`** (the worker default is 900 s;
+   **1200 s recommended** for Qwen-Image-2512: a live 20-step frame on an A40
+   took 409 s, and the catalog's 50-step default approaches 600 s). One warm
+   worker that already loaded the model beats several cold ones; a second worker
+   only helps for queued bursts. Keep the endpoint timeout above the worker job
+   timeout: RunPod kills the run when either expires.
 4. **Populate the volume before traffic.** With `VOLUME_AUTOPOPULATE=true`
    (default) the container downloads missing files from
    [`models-manifest.txt`](models-manifest.txt) into
@@ -275,6 +276,22 @@ rebuild.
    endpoint: put the updated file on the volume and set
    `MANIFEST=/runpod-volume/models-manifest.txt`; this avoids an image build but
    moves the manifest out of image versioning — prefer the rebuild.
+   **The endpoint image is the versioned copy of this manifest.** A file added to
+   `models-manifest.txt` reaches the volume only when a worker built from an image
+   that contains the new manifest cold-starts and runs `populate-volume.sh`.
+   Registering the model in the video_gen `image_models` catalog without updating
+   the endpoint image leaves ComfyUI with the old file list: the frame stops with
+   `keyframe_generation_failed`, and the worker log shows
+   `400 value_not_in_list` for `unet_name` / `clip_name` / `vae_name`. After the
+   image update set `min workers=1` until the first boot's populate finishes, then
+   return `min` to 0 (a queued job also triggers the download, but a 20 GB model
+   can outlive the endpoint timeout while the worker is still booting).
+   **Raise `RUNPOD_INIT_TIMEOUT` on the endpoint (e.g. `1800`)** for that first
+   boot: `populate-volume.sh` runs before the handler starts, so the default
+   RunPod cold-start timeout (~7 minutes) kills the worker in the middle of a
+   20 GB download; it resumes from `.<file>.tmp` on the next boot
+   (`curl --continue-at -`), but the worker can cycle several times before the
+   file lands. The variable only extends initialization, so it can stay set.
 4. **Populate the volume.** With `VOLUME_AUTOPOPULATE=true` the next cold start
    downloads only the missing files (sha256-checked, `.tmp` + atomic rename, flock
    between workers). To avoid a long first job, run
