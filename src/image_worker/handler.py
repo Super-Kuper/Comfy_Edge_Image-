@@ -75,6 +75,46 @@ def _optional_mapping(payload: Mapping[str, Any], name: str) -> Mapping[str, Any
     return value
 
 
+#: Классы сэмплера, у которых число шагов лежит в ``inputs.steps`` (KF-графы).
+_SAMPLER_PREFIXES = ("KSampler", "SamplerCustom")
+#: Имена моделей в загрузчиках: по ним в логе видно, что именно грузится.
+_MODEL_KEYS = ("unet_name", "ckpt_name", "clip_name", "vae_name")
+
+
+def _graph_summary(prompt: Mapping[str, Any]) -> str:
+    """Компактная строка о графе для лога: ноды, шаги, размер, файлы моделей.
+
+    Нужна, чтобы отличать «первый кадр медленный из-за холодной загрузки» от
+    «граф ушёл на другие шаги/модель»: по ``prompt`` в логе видно, сколько
+    шагов реально поедет в GPU и какие файлы будут читаться с тома.
+    """
+
+    nodes = [node for node in prompt.values() if isinstance(node, Mapping)]
+    steps: set[int] = set()
+    models: list[str] = []
+    size = ""
+    for node in nodes:
+        inputs = node.get("inputs")
+        if not isinstance(inputs, Mapping):
+            continue
+        if str(node.get("class_type", "")).startswith(_SAMPLER_PREFIXES):
+            value = inputs.get("steps")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                steps.add(int(value))
+        for key in _MODEL_KEYS:
+            value = inputs.get(key)
+            if isinstance(value, str) and value and value not in models:
+                models.append(value)
+        if not size:
+            width, height = inputs.get("width"), inputs.get("height")
+            if isinstance(width, int) and isinstance(height, int) and not isinstance(width, bool):
+                size = f"{width}x{height}"
+    return (
+        f"нод {len(nodes)}, шагов {sorted(steps) or '?'}, размер {size or '?'}, "
+        f"модели {models or ['?']}"
+    )
+
+
 async def execute(job: Any, deps: Dependencies) -> dict[str, Any]:
     """Выполнить один job; ошибки — ``WorkerError`` наружу (job FAILED)."""
 
@@ -110,6 +150,14 @@ async def execute(job: Any, deps: Dependencies) -> dict[str, Any]:
         _LOG.info("job %s: доставлено assets=%d", _job_id(job), len(asset_paths))
 
     started = time.monotonic()
+    # Снимок того, что уйдёт в GPU: число шагов и файлы моделей видны до submit,
+    # поэтому по логу понятно, почему первый кадр на холодном томе не успевает.
+    _LOG.info(
+        "job %s: граф %s, ожидание до %gs",
+        _job_id(job),
+        _graph_summary(prompt),
+        config.job_timeout_seconds,
+    )
     prompt_id = await comfy.submit(dict(prompt))
     _LOG.info("job %s: граф отправлен, prompt_id=%s", _job_id(job), prompt_id)
 
@@ -119,6 +167,18 @@ async def execute(job: Any, deps: Dependencies) -> dict[str, Any]:
         # Отмена job должна гасить текущий граф в ComfyUI, затем проброс.
         _LOG.warning("job %s: отмена, прерываю ComfyUI (prompt_id=%s)", _job_id(job), prompt_id)
         await comfy.interrupt()
+        raise
+    except WorkerError as exc:
+        # Таймаут ожидания — тоже повод освободить GPU: иначе граф продолжает
+        # считаться, а следующий job стоит за ним в очереди ComfyUI.
+        if exc.code == "comfy_timeout":
+            _LOG.warning(
+                "job %s: таймаут ожидания, прерываю граф ComfyUI (prompt_id=%s)",
+                _job_id(job),
+                prompt_id,
+            )
+            await comfy.interrupt()
+            await comfy.delete_from_queue(prompt_id)
         raise
     # Фактические секунды GPU: submit → history completed.
     elapsed_seconds = time.monotonic() - started
@@ -139,8 +199,9 @@ async def execute(job: Any, deps: Dependencies) -> dict[str, Any]:
 
     result: dict[str, Any] = {**delivery, "telemetry": telemetry}
     _LOG.info(
-        "job %s: готово, %s байт, %sx%s, доставка=%s",
+        "job %s: готово за %gs, %s байт, %sx%s, доставка=%s",
         _job_id(job),
+        elapsed_seconds,
         len(output.data),
         image.width,
         image.height,

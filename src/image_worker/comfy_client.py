@@ -34,6 +34,11 @@ _LOG = logging.getLogger(__name__)
 # "images"; "gifs" оставлен для совместимых save-нод с тем же форматом записи.
 _OUTPUT_KEYS = ("images", "gifs")
 
+#: Как часто ожидание спрашивает ``GET /queue``, чтобы записать в лог переход
+#: «в очереди → выполняется». Сам опрос истории идёт чаще; очередь нужна только
+#: для наблюдаемости холодного первого кадра, поэтому 5 секунд достаточно.
+QUEUE_POLL_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class FileOutput:
@@ -254,7 +259,18 @@ class ComfyClient:
         interval = self.config.comfy_poll_initial_seconds
         path = f"/history/{prompt_id}"
         last_error = "запись ещё не готова"
+        queue_checked_at = 0.0
+        queue_state: str | None = None
         while True:
+            now = time.monotonic()
+            # Раз в QUEUE_POLL_SECONDS фиксируем состояние очереди: по логу видно,
+            # что граф действительно попал в исполнение, а не ждёт в ComfyUI.
+            if now - queue_checked_at >= QUEUE_POLL_SECONDS:
+                queue_checked_at = now
+                state = await self._queue_state(prompt_id)
+                if state is not None and state != queue_state:
+                    queue_state = state
+                    _LOG.info("ComfyUI %s: %s", prompt_id, state)
             try:
                 response = await self._http.get(
                     self._url(path),
@@ -330,6 +346,63 @@ class ComfyClient:
             filename=filename,
             content_type=content_type or "application/octet-stream",
         )
+
+    async def _queue_state(self, prompt_id: str) -> str | None:
+        """Состояние графа в очереди ComfyUI: «выполняется» / «в очереди» / неизвестно.
+
+        ``GET /queue`` отдаёт ``queue_running``/``queue_pending`` — списки записей
+        вида ``[number, prompt_id, prompt, extra, outputs]``. Ошибки чтения не
+        валят ожидание: наблюдаемость не должна менять результат job.
+        """
+
+        try:
+            response = await self._http.get(
+                self._url("/queue"),
+                timeout=self.config.comfy_request_timeout_seconds,
+            )
+        except httpx.HTTPError:
+            return None
+        if response.status_code >= 400:
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        if not isinstance(body, dict):
+            return None
+
+        def _has(items: Any) -> bool:
+            return isinstance(items, list) and any(
+                isinstance(item, list) and len(item) > 1 and item[1] == prompt_id for item in items
+            )
+
+        if _has(body.get("queue_running")):
+            return "выполняется (граф снят с очереди и считается)"
+        pending = body.get("queue_pending")
+        if isinstance(pending, list):
+            for position, item in enumerate(pending, start=1):
+                if isinstance(item, list) and len(item) > 1 and item[1] == prompt_id:
+                    return f"в очереди, позиция {position}"
+        return None
+
+    async def delete_from_queue(self, prompt_id: str) -> None:
+        """Best-effort ``POST /queue {"delete": [id]}``: снять граф из очереди."""
+
+        try:
+            response = await self._http.post(
+                self._url("/queue"),
+                json={"delete": [prompt_id]},
+                timeout=self.config.comfy_request_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - best effort, но не молча
+            _LOG.warning("ComfyUI /queue delete не выполнен: %s: %s", type(exc).__name__, exc)
+            return
+        if response.status_code >= 400:
+            _LOG.warning(
+                "ComfyUI /queue delete ответил HTTP %s: %s",
+                response.status_code,
+                response.text[:200],
+            )
 
     async def interrupt(self) -> None:
         """Best-effort ``POST /interrupt``: отмена job гасит граф ComfyUI."""

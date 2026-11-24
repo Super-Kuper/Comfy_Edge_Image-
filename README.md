@@ -71,8 +71,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.2.1 .
-docker push <registry>/image-serverless:1.2.1
+docker build -t <registry>/image-serverless:1.2.2 .
+docker push <registry>/image-serverless:1.2.2
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -84,7 +84,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.2.1`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.2.2`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -221,6 +221,26 @@ was in flight or the job expired and was purged; it is not a graph error. The
 app repeats the poll a few times (a run may not be registered immediately) and
 reports the response body plus endpoint/run ids, so the card shows the real
 cause.
+
+### Diagnosing a slow first frame
+
+A cold worker pays for model staging inside the **first** job: VAE/text
+encoder/diffusion weights are read from the network volume (`Model storage
+policy: fast_disk=False`), so the first frame can take minutes while every later
+frame on the same worker takes seconds. The worker log makes that visible:
+
+- `job <id>: граф нод N, шагов [X], размер WxH, модели [...]` — what will run,
+  printed before submit;
+- `ComfyUI <prompt_id>: выполняется` / `в очереди, позиция N` — the graph really
+  reached the sampler (or is still queued behind another prompt);
+- `job <id>: готово за Xs` — total time from submit to history.
+
+If the first job ends with `comfy_timeout`, the worker now also calls
+`POST /interrupt` and drops the prompt from the ComfyUI queue, so the GPU is
+freed for the next job. To stop paying the cold cost on every batch, keep one
+worker warm for the batch (`min workers=1`, idle timeout a few minutes) and give
+`JOB_TIMEOUT_SECONDS` (and the service-side keyframe wait) enough headroom for
+staging plus sampling.
 
 ## Models on the network volume
 

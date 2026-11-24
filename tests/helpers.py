@@ -149,6 +149,10 @@ class MockComfyUI:
         self.requests: list[tuple[str, str]] = []
         self.submitted_graphs: list[dict[str, Any]] = []
         self.interrupts = 0
+        # GET /queue: какие графы ComfyUI выполняет и держит в очереди.
+        self.queue_running: list[str] = []
+        self.queue_pending: list[str] = []
+        self.queue_deletes: list[str] = []
         self._history_polls = 0
         self.not_ready_polls = not_ready_polls
 
@@ -181,6 +185,19 @@ class MockComfyUI:
                     return httpx.Response(self.submit_status, json=self.submit_body)
                 return httpx.Response(self.submit_status, json={"error": {"message": "bad graph"}})
             return httpx.Response(200, json={"prompt_id": self.prompt_id})
+
+        if path == "/queue":
+            if request.method == "POST":
+                body = json.loads(request.content.decode("utf-8") or "{}")
+                self.queue_deletes.extend(str(item) for item in (body.get("delete") or []))
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                200,
+                json={
+                    "queue_running": [[index, pid, {}, {}, []] for index, pid in enumerate(self.queue_running)],
+                    "queue_pending": [[index, pid, {}, {}, []] for index, pid in enumerate(self.queue_pending)],
+                },
+            )
 
         if path.startswith("/history/"):
             self._history_polls += 1

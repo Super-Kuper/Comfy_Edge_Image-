@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
+import logging
 import sys
 
 import pytest
@@ -254,6 +256,60 @@ def test_large_image_goes_to_storage_url(config, make_comfy) -> None:
         _run(comfy.close())
     assert set(result) == {"image_url", "telemetry"}
     assert storage.uploaded == 1
+
+
+def test_timeout_interrupts_graph_and_drops_it_from_queue(config, make_comfy) -> None:
+    """Таймаут ожидания освобождает GPU: иначе граф считается, а следующий job ждёт."""
+
+    fast = dataclasses.replace(config, job_timeout_seconds=0.05)
+    mock = MockComfyUI(not_ready_polls=10**9)
+    comfy = make_comfy(mock)
+    handler = build_handler(fast, comfy, gpu_provider=_gpu)
+    try:
+        with pytest.raises(WorkerError) as caught:
+            _run(handler(_job()))
+    finally:
+        _run(comfy.close())
+
+    assert caught.value.code == "comfy_timeout"
+    assert mock.interrupts == 1
+    assert mock.queue_deletes == [mock.prompt_id]
+
+
+def test_job_logs_graph_summary_before_submit(config, make_comfy, caplog) -> None:
+    """До submit в лог уходят шаги, размер и файлы моделей из графа."""
+
+    mock = MockComfyUI()
+    comfy = make_comfy(mock)
+    handler = _handler(config, comfy)
+    try:
+        with caplog.at_level(logging.INFO, logger="image_worker.handler"):
+            _run(handler(_job()))
+    finally:
+        _run(comfy.close())
+
+    assert "нод 9" in caplog.text
+    assert "шагов [4]" in caplog.text
+    assert "размер 768x1344" in caplog.text
+    assert "flux-2-klein-4b.safetensors" in caplog.text
+    assert "ожидание до 2s" in caplog.text
+
+
+def test_wait_logs_queue_transition(config, make_comfy, caplog) -> None:
+    """Переход «в очереди → выполняется» виден в логе ожидания."""
+
+    mock = MockComfyUI(not_ready_polls=2)
+    mock.queue_running = [mock.prompt_id]
+    comfy = make_comfy(mock)
+    handler = _handler(config, comfy)
+    try:
+        with caplog.at_level(logging.INFO, logger="image_worker.comfy_client"):
+            _run(handler(_job()))
+    finally:
+        _run(comfy.close())
+
+    assert "выполняется" in caplog.text
+    assert f"ComfyUI {mock.prompt_id}" in caplog.text
 
 
 def test_cancellation_interrupts_comfy(config) -> None:
