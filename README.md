@@ -21,15 +21,18 @@ weights differ.
 ## Deploy
 
 1. **Storage first.** Create a network volume of at least **100 GB** in a
-   datacenter that offers 48 GB image GPUs (`AMPERE_48` — RTX A6000/A40,
-   `ADA_48_PRO` — L40S/L40/RTX 6000 Ada). The pinned model set is ~66.7 GB; the
-   volume also holds ComfyUI outputs/temporary files and future models. The old
-   60 GB minimum is no longer enough for the current manifest.
+   datacenter that offers image GPUs (`AMPERE_48` — RTX A6000/A40,
+   `ADA_48_PRO` — L40S/L40/RTX 6000 Ada; 48 GB is the default target). If the
+   48 GB pools are empty, the Hub pool falls back to `AMPERE_80` (A100 80 GB)
+   and `BLACKWELL_96` (RTX PRO 6000 96 GB) — more expensive per hour, so they
+   are a fallback for availability, not the default. The pinned model set is
+   ~66.7 GB; the volume also holds ComfyUI outputs/temporary files and future
+   models. The old 60 GB minimum is no longer enough for the current manifest.
 2. **Deploy the worker.** Publish this repository as a GitHub release to
    [RunPod Hub](https://console.runpod.io/hub) (metadata:
-   [`.runpod/hub.json`](.runpod/hub.json) — `AMPERE_48,ADA_48_PRO`,
-   CUDA 13.0–13.4, 40 GB container disk), or build the image and create a
-   serverless endpoint yourself.
+   [`.runpod/hub.json`](.runpod/hub.json) — `AMPERE_48,ADA_48_PRO,AMPERE_80,
+   BLACKWELL_96`, CUDA 13.0–13.4, 40 GB container disk), or build the image and
+   create a serverless endpoint yourself.
 3. **Attach the volume** at `/runpod-volume`, use endpoint type **`QUEUE`**,
    **Max workers = 1–2**, idle timeout short (for example 5–10 s) and endpoint
    timeout **at least `JOB_TIMEOUT_SECONDS`** (the worker default is 900 s;
@@ -55,7 +58,7 @@ weights differ.
 
 | Item | Requirement |
 |---|---|
-| GPU | 48 GB recommended: L40S (`ADA_48_PRO`) primary, RTX A6000 (`AMPERE_48`) cheap fallback. 32 GB works with fp8 Qwen-Image models but leaves little headroom; 24 GB is not supported by this manifest. |
+| GPU | 48 GB recommended: L40S (`ADA_48_PRO`) primary, RTX A6000 (`AMPERE_48`) cheap fallback. If 48 GB is unavailable, the Hub pool also accepts A100 80 GB (`AMPERE_80`) and RTX PRO 6000 96 GB (`BLACKWELL_96`). The Hub build test requests A100 80 GB (health check only, no weights). 32 GB works with fp8 Qwen-Image models but leaves little headroom; 24 GB is not supported by this manifest. |
 | CUDA, endpoint | The image is built on a CUDA 13.0 ComfyUI base pinned by digest (see [Dockerfile](Dockerfile)). Host drivers must support CUDA 13.0 (13.0–13.4 are accepted by the Hub metadata). If the chosen 48 GB pool only advertises CUDA 12.x drivers, rebuild on a CUDA 12.x ComfyUI base and re-pin the digest + `.runpod/hub.json` `allowedCudaVersions`. |
 | Network volume | at least 100 GB at `/runpod-volume` (the pinned set is ~66.7 GB) |
 | Registry | The built image must be available to RunPod (Hub build or your registry) |
@@ -68,8 +71,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.2.0 .
-docker push <registry>/image-serverless:1.2.0
+docker build -t <registry>/image-serverless:1.2.1 .
+docker push <registry>/image-serverless:1.2.1
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -81,7 +84,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.2.0`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.2.1`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -541,9 +544,12 @@ executed while building this repository:
   sampler/loader classes listed in the contract to measure telemetry; if the
   catalog graph uses other classes, the job fails with `telemetry_missing`
   (visible, not silent) and the contract must be extended.
-- **CUDA 13.0 base vs. 48 GB pools** — if `AMPERE_48`/`ADA_48_PRO` hosts only
-  advertise CUDA 12.x drivers, the pinned base will not start; rebuild on a
-  CUDA 12.x ComfyUI image and re-pin the digest and `allowedCudaVersions`.
+- **CUDA 13.0 base vs. GPU pools** — the image is built on a CUDA 13.0 base, so
+  it only starts on hosts whose drivers report CUDA 13.x (`allowedCudaVersions`
+  13.0–13.4). If the available pools only advertise CUDA 12.x drivers, the image
+  will not start; rebuild on a CUDA 12.x ComfyUI base and re-pin the digest,
+  `allowedCudaVersions` and the pools. Wider pools (`AMPERE_80`,
+  `BLACKWELL_96`) improve placement, but do not relax this constraint.
 - **Model downloads** — pinned revisions and sha256 come from the public
   Hugging Face metadata; the ~66.7 GB download itself was not run. A wrong
   mirror (`HF_ENDPOINT`) that drops the commit path fails the pin check by

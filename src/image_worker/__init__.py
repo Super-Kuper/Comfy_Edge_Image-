@@ -8,4 +8,4 @@ assets?, action?}}`, выход `{image | image_url, telemetry}`; источни
 на уровне модулей: тесты должны идти без GPU, сети и runpod SDK.
 """
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"

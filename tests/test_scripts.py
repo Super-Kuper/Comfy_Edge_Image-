@@ -167,6 +167,39 @@ def test_runpod_metadata_is_valid_json() -> None:
     assert "VOLUME_AUTOPOPULATE" in {item["key"] for item in tests["config"]["env"]}
 
 
+def test_hub_gpu_pools_cover_48gb_and_larger_fallbacks() -> None:
+    """Пустой 48 GB пул не должен валить сборку: в gpuIds есть запасные карты.
+
+    Боевая сборка упала с «no instances available for NVIDIA RTX A6000 nor on any
+    of the fallback GPUs NVIDIA A40, NVIDIA L40»: фолбэки брались из `gpuIds`,
+    а там были только 48 GB пулы. 48 GB остаются первыми (дешёвый и достаточный
+    вариант), выше классом — запас на доступность.
+    """
+
+    hub = json.loads((ROOT / ".runpod" / "hub.json").read_text(encoding="utf-8"))
+    pools = [item.strip() for item in hub["config"]["gpuIds"].split(",")]
+    assert pools[0] in {"AMPERE_48", "ADA_48_PRO"}, pools
+    assert {"AMPERE_48", "ADA_48_PRO"} <= set(pools), pools
+    assert {"AMPERE_80", "BLACKWELL_96"} <= set(pools), pools
+
+    tests = json.loads((ROOT / ".runpod" / "tests.json").read_text(encoding="utf-8"))
+    assert tests["config"]["gpuTypeId"].startswith("NVIDIA ")
+
+
+def test_version_is_aligned_across_metadata() -> None:
+    """Версия в hub.json, pyproject, Dockerfile, __init__ и README совпадает."""
+
+    version = json.loads((ROOT / ".runpod" / "hub.json").read_text(encoding="utf-8"))["version"].lstrip("v")
+    assert re.search(rf'^version = "{re.escape(version)}"$', (ROOT / "pyproject.toml").read_text(encoding="utf-8"), re.M)
+    assert re.search(
+        rf"^ARG IMAGE_WORKER_VERSION={re.escape(version)}$",
+        (ROOT / "Dockerfile").read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert f'__version__ = "{version}"' in (ROOT / "src" / "image_worker" / "__init__.py").read_text(encoding="utf-8")
+    assert f"image-serverless:{version}" in (ROOT / "README.md").read_text(encoding="utf-8")
+
+
 # --- populate-volume.sh: режимы сверки VERIFY=fast|full|off --------------------
 #
 # Мотивация: полная сверка 66.7 GB на каждом cold start занимает ~4.5 минуты
