@@ -80,12 +80,23 @@ the worker does not change the graph or the denoise. There is no separate `mode`
 field in the contract — `parameter.mode` is tracing data only.
 
 For Qwen-Image-Edit, `TextEncodeQwenImageEdit` takes the reference image and the
-prompt: the reference supplies style, the prompt describes the new frame. The
-example is [`examples/request-i2i.json`](examples/request-i2i.json). The
-application attaches the style reference only when the catalog model declares
+prompt: in the i2i/style-reference mode the reference supplies style, the prompt
+describes the new frame. The example is
+[`examples/request-i2i.json`](examples/request-i2i.json). The application
+attaches that reference only when the catalog model declares
 `capabilities.style_reference` and the graph template has the
 `{{style_reference}}` placeholder; otherwise the reference is not sent. The
 worker verifies and writes the file exactly like any other asset.
+
+For the style-container two-pass flow the graph uses
+`TextEncodeQwenImageEditPlus` with named image roles, not the i2i mode:
+`style_reference` + `location` for the compose pass, then `base` +
+`character_1`/`character_2` for the identity pass. The application sends each
+role as an `image` asset with the graph's filename; the worker does not apply
+masks, crops or denoise — the graph owns `ImageScaleToTotalPixels`, latent
+encoding and `KSampler.denoise`. The reference-cleanup pass sends one
+`source` image and receives a cleaned variant; approve happens in the app and
+creates a new style/location version, never overwrites the original.
 
 ## 2. Job output
 
@@ -206,8 +217,12 @@ this table.
 
 Container boot variables are read by `docker/entrypoint.sh` and the volume
 scripts, not by the handler: `VOLUME_AUTOPOPULATE` (default `true`) and
-`HF_ENDPOINT`/`HF_TOKEN` control the model download, `COMFYUI_PYTHON` selects the
-interpreter, and `COMFY_START_CMD` overrides how ComfyUI is started.
+`HF_ENDPOINT`/`HF_TOKEN` control the model download, `VOLUME_VERIFY` (`fast`,
+`full` or `off`) and `VOLUME_BACKGROUND_VERIFY` (default `true`) select how the
+existing volume is checked — `fast` trusts the recorded size+mtime and the full
+sha256 pass runs in the background after the handler starts — `COMFYUI_PYTHON`
+selects the interpreter, and `COMFY_START_CMD` overrides how ComfyUI is started.
+None of them changes the request/response contract.
 
 ## 6. Model graphs and the `image_models` catalog
 

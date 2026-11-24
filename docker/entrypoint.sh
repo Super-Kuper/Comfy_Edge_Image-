@@ -10,9 +10,14 @@
 #   4. ожидание готовности ComfyUI по /system_stats (scripts/wait-comfy.sh,
 #      таймаут COMFY_BOOT_TIMEOUT_SECONDS);
 #   5. автоскачивание моделей на том (VOLUME_AUTOPOPULATE=true,
-#      populate-volume.sh + models-manifest.txt);
+#      populate-volume.sh + models-manifest.txt) в режиме VERIFY=fast: файл
+#      считается целым по паре (размер, mtime) из состояния тома, поэтому
+#      неизменный том больше не читается целиком до старта handler'а;
 #   6. запуск handler'а: handler.py (PYTHONPATH задан в образе);
-#   7. SIGTERM/SIGINT пробрасываются handler'у, ComfyUI гасится при выходе.
+#   7. фоновая полная сверка sha256 (VOLUME_BACKGROUND_VERIFY=true) уже после
+#      старта handler'а: целостность 66.7 GB проверяется на каждом boot, но
+#      больше не задерживает воркер; SIGTERM останавливает и её;
+#   8. SIGTERM/SIGINT пробрасываются handler'у, ComfyUI гасится при выходе.
 #
 # Почему не `exec python handler.py`: при exec shell заменяется процессом
 # handler'а, и trap на SIGTERM перестал бы работать — ComfyUI оставался бы
@@ -56,6 +61,15 @@ VOLUME_ROOT="${VOLUME_ROOT:-/runpod-volume}"
 LINK_VOLUME_NODES="${LINK_VOLUME_NODES:-false}"
 # VOLUME_AUTOPOPULATE=true — докачать отсутствующие модели на том при старте.
 VOLUME_AUTOPOPULATE="${VOLUME_AUTOPOPULATE:-true}"
+# VOLUME_VERIFY — политика сверки существующих моделей до старта handler'а:
+#   fast (по умолчанию) — доверять (размер, mtime) из состояния тома;
+#   full — всегда читать sha256 (медленно: ~4.5 мин на 66.7 GB);
+#   off  — не проверять (только отладка).
+VOLUME_VERIFY="${VOLUME_VERIFY:-fast}"
+# VOLUME_BACKGROUND_VERIFY=true — после старта handler'а запустить полную
+# сверку sha256 фоном (VERIFY=full). Не блокирует воркер и видна в логах как
+# [populate-verify].
+VOLUME_BACKGROUND_VERIFY="${VOLUME_BACKGROUND_VERIFY:-true}"
 # HF_TOKEN — токен Hugging Face для gated-репозиториев в models-manifest.txt.
 HF_TOKEN="${HF_TOKEN:-}"
 IMAGE_WORKER_DIR="${IMAGE_WORKER_DIR:-/opt/image-worker}"
@@ -71,6 +85,7 @@ export COMFY_URL="${COMFY_URL:-http://${COMFY_HOST}:${COMFY_PORT}}"
 
 COMFY_PID=""
 HANDLER_PID=""
+VERIFY_PID=""
 
 log() { printf '[entrypoint] %s\n' "$*"; }
 warn() { printf '[entrypoint] WARN: %s\n' "$*" >&2; }
@@ -110,7 +125,10 @@ _cleanup() {
     local code=$?
     trap - EXIT
     set +e
-    # Сначала handler: он может успеть завершить/отменить текущий job.
+    # Сверка читает том и воркеру больше не нужна: гасим первой, чтобы не
+    # держать сетевой том в момент остановки контейнера.
+    _stop_background_verify
+    # Затем handler: он может успеть завершить/отменить текущий job.
     _stop_process "${HANDLER_PID}" "handler"
     # ComfyUI держим только пока жив воркер (наружу не публикуется).
     _stop_process "${COMFY_PID}" "ComfyUI"
@@ -289,10 +307,91 @@ _populate_volume() {
         warn "нет исполняемого ${POPULATE_SH}: автоскачивание моделей пропущено"
         return 0
     fi
-    log "автоскачивание моделей: ${POPULATE_SH} (манифест ${MANIFEST})"
-    if ! VOL_ROOT="${VOLUME_ROOT}" MANIFEST="${MANIFEST}" HF_TOKEN="${HF_TOKEN}" "${POPULATE_SH}"; then
+    log "автоскачивание моделей: ${POPULATE_SH} (манифест ${MANIFEST}, сверка ${VOLUME_VERIFY})"
+    if ! VOL_ROOT="${VOLUME_ROOT}" MANIFEST="${MANIFEST}" HF_TOKEN="${HF_TOKEN}" \
+        VERIFY="${VOLUME_VERIFY}" POPULATE_LABEL=populate "${POPULATE_SH}"; then
         warn "автоскачивание моделей завершилось с ошибкой: job'ы на отсутствующих моделях упадут (health доступен)"
     fi
+}
+
+# --- 5b. Фоновая полная сверка sha256 ----------------------------------------
+
+# Смысл: полная проверка 66.7 GB остаётся на каждом boot, но её результат
+# нужен не для старта, а для гарантии целостности. Поэтому она идёт фоном уже
+# после handler'а и не отнимает у холодного старта ~4.5 минуты. Находки
+# печатаются как [populate-verify] и ремонтируются тем же populate (карантин +
+# перекачка), поэтому расхождение не остаётся молчаливым.
+_start_background_verify() {
+    if [[ "${VOLUME_AUTOPOPULATE}" != "true" ]]; then
+        return 0
+    fi
+    if [[ "${VOLUME_BACKGROUND_VERIFY}" != "true" ]]; then
+        log "VOLUME_BACKGROUND_VERIFY=${VOLUME_BACKGROUND_VERIFY}: фоновая сверка выключена"
+        return 0
+    fi
+    if [[ "${VOLUME_VERIFY}" == "off" ]]; then
+        log "VOLUME_VERIFY=off: фоновая сверка не запускается"
+        return 0
+    fi
+    if [[ "${VOLUME_VERIFY}" == "full" ]]; then
+        log "фоновая сверка не нужна: VERIFY=full уже проверил том до старта handler'а"
+        return 0
+    fi
+    if [[ ! -d "${VOLUME_ROOT}" || ! -x "${POPULATE_SH}" ]]; then
+        return 0
+    fi
+
+    # nice/ionice — чтобы фоновая сверка не отбирала том у первого job'а
+    # (первая загрузка весов читает с тома те же ~20 GB).
+    local prefix=()
+    if command -v nice >/dev/null 2>&1; then
+        prefix+=(nice -n 19)
+    fi
+    if command -v ionice >/dev/null 2>&1; then
+        prefix+=(ionice -c3)
+    fi
+
+    log "фоновая сверка sha256: ${POPULATE_SH} (VERIFY=full, handler уже стартует; в логах [populate-verify])"
+    if command -v setsid >/dev/null 2>&1; then
+        # setsid — отдельная сессия/группа: при остановке гасим всю группу, чтобы
+        # не оставить осиротевший sha256sum/curl, и при этом не задеть entrypoint.
+        setsid "${prefix[@]}" env \
+            VOL_ROOT="${VOLUME_ROOT}" MANIFEST="${MANIFEST}" HF_TOKEN="${HF_TOKEN}" \
+            VERIFY=full POPULATE_LABEL=populate-verify "${POPULATE_SH}" &
+    else
+        "${prefix[@]}" env \
+            VOL_ROOT="${VOLUME_ROOT}" MANIFEST="${MANIFEST}" HF_TOKEN="${HF_TOKEN}" \
+            VERIFY=full POPULATE_LABEL=populate-verify "${POPULATE_SH}" &
+    fi
+    VERIFY_PID=$!
+    log "фоновая сверка запущена (pid ${VERIFY_PID}); холодный старт её не ждёт"
+}
+
+_stop_background_verify() {
+    local grace=5 i pgid=""
+    [[ -n "${VERIFY_PID}" ]] || return 0
+    kill -0 "${VERIFY_PID}" 2>/dev/null || return 0
+    log "останавливаю фоновую сверку (pid ${VERIFY_PID})"
+    # Группу гасим только если процесс действительно её лидер (это гарантирует
+    # setsid). Иначе отрицательный PID задел бы entrypoint и ComfyUI, поэтому
+    # без лидерства гасим точечно: дети, затем сам процесс.
+    pgid="$(ps -o pgid= -p "${VERIFY_PID}" 2>/dev/null | tr -d ' ')"
+    if [[ -n "${pgid}" && "${pgid}" == "${VERIFY_PID}" ]]; then
+        kill -TERM -- "-${VERIFY_PID}" 2>/dev/null || true
+    else
+        pkill -TERM -P "${VERIFY_PID}" 2>/dev/null || true
+        kill -TERM "${VERIFY_PID}" 2>/dev/null || true
+    fi
+    for ((i = 0; i < grace * 2; i++)); do
+        kill -0 "${VERIFY_PID}" 2>/dev/null || return 0
+        sleep 0.5
+    done
+    if [[ -n "${pgid}" && "${pgid}" == "${VERIFY_PID}" ]]; then
+        kill -KILL -- "-${VERIFY_PID}" 2>/dev/null || true
+    else
+        kill -KILL "${VERIFY_PID}" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # --- 6. Запуск handler'а -----------------------------------------------------
@@ -344,7 +443,7 @@ _start_handler() {
 
 main() {
     log "image-serverless worker ${IMAGE_WORKER_VERSION} (ComfyUI + FLUX.2 klein / Qwen-Image-2512 / Qwen-Image-Edit)"
-    log "COMFYUI_DIR=${COMFYUI_DIR} COMFYUI_PYTHON=${COMFYUI_PYTHON:-<авто>} COMFY_URL=${COMFY_URL} VOLUME_ROOT=${VOLUME_ROOT} LINK_VOLUME_NODES=${LINK_VOLUME_NODES} VOLUME_AUTOPOPULATE=${VOLUME_AUTOPOPULATE}"
+    log "COMFYUI_DIR=${COMFYUI_DIR} COMFYUI_PYTHON=${COMFYUI_PYTHON:-<авто>} COMFY_URL=${COMFY_URL} VOLUME_ROOT=${VOLUME_ROOT} LINK_VOLUME_NODES=${LINK_VOLUME_NODES} VOLUME_AUTOPOPULATE=${VOLUME_AUTOPOPULATE} VOLUME_VERIFY=${VOLUME_VERIFY} VOLUME_BACKGROUND_VERIFY=${VOLUME_BACKGROUND_VERIFY}"
 
     # Ранняя диагностика: на stub-базе (python:3.12-slim) ComfyUI нет — явная
     # ошибка вместо падения где-то в середине boot. COMFY_START_CMD — исключение:
@@ -358,6 +457,8 @@ main() {
     _start_comfyui
     _wait_for_comfyui
     _populate_volume
+    # Полная сверка — уже параллельно с handler'ом: холодный старт её не ждёт.
+    _start_background_verify
 
     export COMFY_URL
     _start_handler

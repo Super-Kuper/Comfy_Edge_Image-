@@ -68,8 +68,8 @@ CUDA 13.0 image pinned by digest and adds the worker package, `handler.py` and
 the volume scripts.
 
 ```bash
-docker build -t <registry>/image-serverless:1.1.2 .
-docker push <registry>/image-serverless:1.1.2
+docker build -t <registry>/image-serverless:1.2.0 .
+docker push <registry>/image-serverless:1.2.0
 ```
 
 Structural build without ComfyUI or a GPU (checks that the Dockerfile, package
@@ -81,7 +81,7 @@ docker build --build-arg BASE_IMAGE=python:3.12-slim \
 docker run --rm --entrypoint python image-serverless:stub -c "import image_worker"
 ```
 
-Optional build args: `IMAGE_WORKER_VERSION` (`1.1.2`), `COMFYUI_VERSION`
+Optional build args: `IMAGE_WORKER_VERSION` (`1.2.0`), `COMFYUI_VERSION`
 (`v0.44.0`), `BASE_IMAGE`. Pin by digest:
 `docker inspect --format='{{index .RepoDigests 0}}' <image>`.
 
@@ -240,9 +240,42 @@ a readable error. It also creates `/runpod-volume/custom_nodes` and
 | `vae/qwen_image_vae.safetensors` | same repository | 0.25 GB |
 
 Volume manifest and boot variables: `models-manifest.txt`; `VOLUME_AUTOPOPULATE`
+(default `true`), `VOLUME_VERIFY` (default `fast`), `VOLUME_BACKGROUND_VERIFY`
 (default `true`), `HF_TOKEN` (optional, gated repositories only) and
 `HF_ENDPOINT` (optional mirror; the commit path is preserved). The download
 target is `$VOLUME_ROOT/models`.
+
+### Boot checks: fast path and background verification
+
+`populate-volume.sh` runs before the handler starts, so it must not re-read the
+whole volume on every cold start: hashing the pinned sha256 of all 66.7 GB takes
+~4.5 minutes on the RunPod network volume (~245 MB/s) — 94% of the boot time
+measured in a real worker log. The script therefore keeps
+`models/.populate-state.tsv` (`<subdir>/<file>\t<sha256>\t<size>\t<mtime>`) and,
+with `VERIFY=fast` (default), treats a file as intact when the recorded sha256,
+size and mtime still match: a warm boot is a handful of `stat` calls. Rows
+written by older worker versions have no mtime, so such a file is hashed once
+and upgraded in place — no re-download, no manual migration.
+
+Metadata mismatch (new pin, changed size or mtime) or `VERIFY=full` reads the
+file. A file that does not match its pin is moved to `<file>.corrupt-<UTC>` and
+re-downloaded, so ComfyUI never sees known-bad weights: the job fails visibly
+instead of generating from corrupted bytes, and the quarantine copy is removed
+only after the verified replacement is in place (it stays for diagnosis if the
+re-download fails).
+
+The full check still runs on every boot, but off the critical path: once the
+handler is up, `entrypoint.sh` starts a second populate pass with `VERIFY=full`
+(`[populate-verify]` in the log, `nice`/`ionice`, stopped on `SIGTERM`). It
+repairs whatever it finds, so integrity is verified seconds after boot instead
+of blocking it. It does share the volume with the first job's weight load, so the
+first render can be somewhat slower until the pass finishes. Set `VOLUME_BACKGROUND_VERIFY=false` to skip it (the volume is
+then verified only when metadata changes) or `VOLUME_VERIFY=full` to keep the
+old blocking behaviour.
+
+The flock on `$VOLUME_ROOT/.populate.lock` is taken only around mutations
+(download, quarantine, state write), never around hashing: a background check in
+one worker does not stall the boot of another worker on the same volume.
 
 ### Adding a new model (weights + image)
 
@@ -291,10 +324,13 @@ rebuild.
    RunPod cold-start timeout (~7 minutes) kills the worker in the middle of a
    20 GB download; it resumes from `.<file>.tmp` on the next boot
    (`curl --continue-at -`), but the worker can cycle several times before the
-   file lands. The variable only extends initialization, so it can stay set.
+   file lands. The variable only extends initialization, so it can stay set. It
+   covers the first download only: a warm boot no longer re-reads the volume
+   (see "Boot checks" above), so returning `min` to 0 no longer costs minutes.
 4. **Populate the volume.** With `VOLUME_AUTOPOPULATE=true` the next cold start
    downloads only the missing files (sha256-checked, `.tmp` + atomic rename, flock
-   between workers). To avoid a long first job, run
+   between workers) and verifies the rest in the background after the handler is
+   up. To avoid a long first job, run
    `populate-volume.sh` in a temporary CPU pod with the same volume:
    ```bash
    VOL_ROOT=/runpod-volume MANIFEST=/opt/image-worker/models-manifest.txt \
@@ -453,6 +489,8 @@ nodes take precedence and the conflict is logged.
 | Variable | Default | Purpose |
 |---|---|---|
 | `VOLUME_AUTOPOPULATE` | `true` | Download missing models to the volume at boot. |
+| `VOLUME_VERIFY` | `fast` | `fast` trusts the recorded size+mtime from `.populate-state.tsv`; `full` always reads sha256; `off` skips the check (debug only). |
+| `VOLUME_BACKGROUND_VERIFY` | `true` | Run the full sha256 pass in the background after the handler starts (`[populate-verify]`). |
 | `HF_TOKEN` | — | Token for gated Hugging Face repositories (optional). |
 | `JOB_TIMEOUT_SECONDS` | `900` | Maximum graph run time inside the worker. |
 | `COMFY_BOOT_TIMEOUT_SECONDS` | `600` | How long to wait for the local ComfyUI to start. |
